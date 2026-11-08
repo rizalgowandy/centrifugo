@@ -1,27 +1,34 @@
-export GO111MODULE=on
-
 VERSION := $(shell git describe --tags | sed -e 's/^v//g' | awk -F "-" '{print $$1}')
 ITERATION := $(shell git describe --tags --long | awk -F "-" '{print $$2}')
-TESTFOLDERS := $(shell go list ./... | grep -v /vendor/ | grep -v /misc/)
-
-DOC_IMAGE := centrifugo-docs
-DOCKER_RUN_DOC_PORT := 8000
-DOCKER_RUN_DOC_MOUNT := -v $(CURDIR)/docs:/mkdocs
-DOCKER_RUN_DOC_OPTS := --rm $(DOCKER_RUN_DOC_MOUNT) -p $(DOCKER_RUN_DOC_PORT):8000
+TESTFOLDERS := $(shell go list ./... | grep -v /misc/)
+# Packages to test, all by default. To run a part of them like CI does:
+#   make test-integration TEST_PACKAGES="$(bash misc/scripts/test_packages.sh integration)"
+TEST_PACKAGES ?= $(TESTFOLDERS)
 
 all: test
 
-prepare:
-	go get github.com/mitchellh/gox
-
 test:
-	go test -count=1 -v $(TESTFOLDERS) -cover -race
+	go test -count=1 -v $(strip $(TEST_PACKAGES)) -cover -race
+
+test-integration:
+	go test -count=1 -v $(strip $(TEST_PACKAGES)) -cover -race --tags=integration
+
+generate:
+	bash misc/scripts/generate.sh
+	go generate ./...
 
 web:
 	./misc/scripts/update_web.sh
 
+swagger-web:
+	make generate
+	./misc/scripts/update_swagger_web.sh
+
 package:
 	./misc/scripts/package.sh $(VERSION) $(ITERATION)
+
+sync-websocket:
+	rsync -av --exclude '*/' ../centrifuge/internal/websocket/ internal/websocket/
 
 packagecloud:
 	make packagecloud-deb
@@ -29,30 +36,20 @@ packagecloud:
 
 packagecloud-deb:
 	# PACKAGECLOUD_TOKEN env must be set
-	package_cloud push FZambia/centrifugo/debian/jessie PACKAGES/*.deb
-	package_cloud push FZambia/centrifugo/debian/stretch PACKAGES/*.deb
-	package_cloud push FZambia/centrifugo/debian/buster PACKAGES/*.deb
+	package_cloud push --skip-duplicates FZambia/centrifugo/debian/buster PACKAGES/*.deb
+	package_cloud push --skip-duplicates FZambia/centrifugo/debian/bullseye PACKAGES/*.deb
+	package_cloud push --skip-duplicates FZambia/centrifugo/debian/bookworm PACKAGES/*.deb
 
-	package_cloud push FZambia/centrifugo/ubuntu/xenial PACKAGES/*.deb
-	package_cloud push FZambia/centrifugo/ubuntu/bionic PACKAGES/*.deb
-	package_cloud push FZambia/centrifugo/ubuntu/focal PACKAGES/*.deb
+	package_cloud push --skip-duplicates FZambia/centrifugo/ubuntu/focal PACKAGES/*.deb
+	package_cloud push --skip-duplicates FZambia/centrifugo/ubuntu/jammy PACKAGES/*.deb
+	package_cloud push --skip-duplicates FZambia/centrifugo/ubuntu/noble PACKAGES/*.deb
 
 packagecloud-rpm:
 	# PACKAGECLOUD_TOKEN env must be set
-	package_cloud push FZambia/centrifugo/el/7 PACKAGES/*.rpm
-	package_cloud push FZambia/centrifugo/el/8 PACKAGES/*.rpm
+	package_cloud push --skip-duplicates FZambia/centrifugo/el/7 PACKAGES/*.rpm
 
-docs: docs-image
-	docker run $(DOCKER_RUN_DOC_OPTS) $(DOC_IMAGE) mkdocs serve
-
-docs-deploy: docs-image
-	cd docs && mkdocs gh-deploy
-
-docs-image:
-	docker build -t $(DOC_IMAGE) -f docs/Dockerfile docs/
-
-docs-env-create:
-	python3 -m venv .venv
+update-deps:
+	./misc/scripts/update-deps.sh
 
 deps:
 	go mod tidy
@@ -62,5 +59,40 @@ local-deps:
 	go mod download
 	go mod vendor
 
+GOLANGCI_LINT_VERSION := $(shell cat .golangci-lint-version)
+
+lint:
+	@if ! command -v golangci-lint >/dev/null 2>&1; then \
+		echo "golangci-lint not found. Run 'make install-lint' to install $(GOLANGCI_LINT_VERSION)."; \
+		exit 1; \
+	fi
+	@INSTALLED=$$(golangci-lint version --short 2>/dev/null); \
+	EXPECTED=$$(echo $(GOLANGCI_LINT_VERSION) | sed 's/^v//'); \
+	if [ "$${INSTALLED%%.*}" != "$${EXPECTED%%.*}" ] || [ "$${INSTALLED#*.}" != "$${EXPECTED#*.}" ]; then \
+		echo "golangci-lint version mismatch: installed $${INSTALLED}, expected $${EXPECTED}. Run 'make install-lint'."; \
+		exit 1; \
+	fi
+	golangci-lint run --timeout 10m0s --verbose
+
+install-lint:
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
+vuln:
+	@if ! command -v govulncheck >/dev/null 2>&1; then \
+		echo "govulncheck not found, installing..."; \
+		go install golang.org/x/vuln/cmd/govulncheck@latest; \
+	fi
+	govulncheck ./...
+
+# Compares what clients, backends and operators observe between BASE (a git
+# ref) and the current tree. See misc/snapshot/README.md.
+#   make snapshot-diff BASE=master [SNAPSHOT_FLAGS="-with redis,postgres"]
+snapshot-diff:
+	BASE="$(BASE)" SNAPSHOT_FLAGS="$(SNAPSHOT_FLAGS)" bash misc/snapshot/snapshot_diff.sh
+
+snapshot-test:
+	cd misc/snapshot && go vet ./... && go test -count=1 ./...
+
 build:
 	CGO_ENABLED=0 go build
+

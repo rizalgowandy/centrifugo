@@ -2,13 +2,10 @@ package proxy
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
-	"net/http"
+	"fmt"
 
-	"github.com/centrifugal/centrifuge"
-
-	"github.com/centrifugal/centrifugo/internal/middleware"
+	"github.com/centrifugal/centrifugo/v6/internal/proxyproto"
 )
 
 // PublishRequestHTTP ...
@@ -25,62 +22,53 @@ type PublishRequestHTTP struct {
 
 // HTTPPublishProxy ...
 type HTTPPublishProxy struct {
+	config     Config
 	httpCaller HTTPCaller
-	options    Options
 }
 
+var _ PublishProxy = (*HTTPPublishProxy)(nil)
+
 // NewHTTPPublishProxy ...
-func NewHTTPPublishProxy(endpoint string, httpClient *http.Client, opts ...Option) *HTTPPublishProxy {
-	options := &Options{}
-	for _, opt := range opts {
-		opt(options)
+func NewHTTPPublishProxy(p Config) (*HTTPPublishProxy, error) {
+	httpClient, err := proxyHTTPClient(p, "publish_proxy")
+	if err != nil {
+		return nil, fmt.Errorf("error creating HTTP client: %w", err)
 	}
 	return &HTTPPublishProxy{
-		httpCaller: NewHTTPCaller(endpoint, httpClient),
-		options:    *options,
-	}
+		httpCaller: NewHTTPCaller(httpClient),
+		config:     p,
+	}, nil
 }
 
 // ProxyPublish proxies Publish to application backend.
-func (p *HTTPPublishProxy) ProxyPublish(ctx context.Context, req PublishRequest) (*PublishReply, error) {
-	httpRequest := middleware.HeadersFromContext(ctx)
-
-	publishHTTPReq := PublishRequestHTTP{
-		baseRequestHTTP: baseRequestHTTP{
-			Transport: req.Transport.Name(),
-			Protocol:  string(req.Transport.Protocol()),
-			Encoding:  string(req.Transport.Encoding()),
-			ClientID:  req.ClientID,
-		},
-		UserID:  req.UserID,
-		Channel: req.Channel,
-	}
-
-	if req.Transport.Encoding() == centrifuge.EncodingTypeJSON {
-		publishHTTPReq.Data = req.Data
-	} else {
-		publishHTTPReq.Base64Data = base64.StdEncoding.EncodeToString(req.Data)
-	}
-
-	data, err := json.Marshal(publishHTTPReq)
+func (p *HTTPPublishProxy) ProxyPublish(ctx context.Context, req *proxyproto.PublishRequest) (*proxyproto.PublishResponse, error) {
+	data, err := httpEncoder.EncodePublishRequest(req)
 	if err != nil {
 		return nil, err
 	}
-
-	respData, err := p.httpCaller.CallHTTP(ctx, getProxyHeader(httpRequest, p.options.ExtraHeaders), data)
+	respData, err := p.httpCaller.CallHTTP(ctx, p.config.Endpoint, httpRequestHeaders(ctx, p.config), data)
 	if err != nil {
-		return nil, err
+		return transformPublishResponse(err, p.config.HTTP.StatusToCodeTransforms)
 	}
-
-	var res PublishReply
-	err = json.Unmarshal(respData, &res)
-	if err != nil {
-		return nil, err
-	}
-	return &res, nil
+	return httpDecoder.DecodePublishResponse(respData)
 }
 
 // Protocol ...
 func (p *HTTPPublishProxy) Protocol() string {
 	return "http"
+}
+
+// UseBase64 ...
+func (p *HTTPPublishProxy) UseBase64() bool {
+	return p.config.BinaryEncoding
+}
+
+// IncludeMeta ...
+func (p *HTTPPublishProxy) IncludeMeta() bool {
+	return p.config.IncludeConnectionMeta
+}
+
+// Close closes idle connections to the proxy endpoint.
+func (p *HTTPPublishProxy) Close() error {
+	return closeHTTPCaller(p.httpCaller)
 }

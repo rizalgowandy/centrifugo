@@ -1,7 +1,4 @@
 #!/bin/sh
-sudo gem install rake
+# Not pinned: package_cloud is an API client, its latest version follows packagecloud API changes.
 sudo gem install package_cloud
-sudo gem install fpm
-sudo apt-get install -y rpm
-make package
 make packagecloud

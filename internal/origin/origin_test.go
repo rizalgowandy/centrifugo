@@ -43,6 +43,30 @@ func TestPatternCheck(t *testing.T) {
 			success: false,
 		},
 		{
+			name:   "origin_patterns_uppercase_in_pattern",
+			origin: "https://two.example.com",
+			originPatterns: []string{
+				"https://*.Example.com",
+			},
+			success: true,
+		},
+		{
+			name:   "origin_patterns_uppercase_in_pattern_and_origin",
+			origin: "HTTPS://App.Example.com",
+			originPatterns: []string{
+				"https://APP.example.COM",
+			},
+			success: true,
+		},
+		{
+			name:   "origin_patterns_uppercase_in_pattern_no_match",
+			origin: "https://two.example.org",
+			originPatterns: []string{
+				"https://*.Example.com",
+			},
+			success: false,
+		},
+		{
 			name:   "origin_patterns_cyrillic_e_in_origin",
 			origin: "https://two.еxample.com",
 			originPatterns: []string{
@@ -79,70 +103,11 @@ func TestPatternCheck(t *testing.T) {
 
 			a, err := NewPatternChecker(tc.originPatterns)
 			require.NoError(t, err)
-			err = a.Check(r)
+			ok := a.Check(r)
 			if tc.success {
-				require.NoError(t, err)
+				require.True(t, ok)
 			} else {
-				require.Error(t, err)
-			}
-		})
-	}
-}
-
-func TestCheckSameHost(t *testing.T) {
-	t.Parallel()
-
-	testCases := []struct {
-		name    string
-		origin  string
-		url     string
-		success bool
-	}{
-		{
-			name:    "empty_origin",
-			origin:  "",
-			success: true,
-			url:     "https://example.com/websocket/connection",
-		},
-		{
-			name:    "invalid_host",
-			origin:  "invalid",
-			url:     "https://example.com/websocket/connection",
-			success: false,
-		},
-		{
-			name:    "unauthorized",
-			origin:  "https://example.com",
-			url:     "wss://example1.com/websocket/connection",
-			success: false,
-		},
-		{
-			name:    "authorized",
-			origin:  "https://example.com",
-			url:     "wss://example.com/websocket/connection",
-			success: true,
-		},
-		{
-			name:    "authorized_case_insensitive",
-			origin:  "https://examplE.com",
-			url:     "wss://example.com/websocket/connection",
-			success: true,
-		},
-	}
-
-	for _, tc := range testCases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			r := httptest.NewRequest("GET", tc.url, nil)
-			r.Header.Set("Origin", tc.origin)
-
-			err := CheckSameHost(r)
-			if tc.success {
-				require.NoError(t, err)
-			} else {
-				require.Error(t, err)
+				require.False(t, ok)
 			}
 		})
 	}

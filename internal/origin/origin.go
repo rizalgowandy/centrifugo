@@ -3,20 +3,22 @@ package origin
 import (
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/gobwas/glob"
 )
 
 type PatternChecker struct {
-	allowedOrigins []glob.Glob
+	allowedOrigins []*glob.Pattern
 }
 
 func NewPatternChecker(allowedOrigins []string) (*PatternChecker, error) {
-	var globs []glob.Glob
+	var globs []*glob.Pattern
 	for _, pattern := range allowedOrigins {
-		g, err := glob.Compile(pattern)
+		// Origin is matched in lower case (scheme and host are case-insensitive),
+		// so patterns must be lower-cased too – otherwise a pattern containing
+		// upper-case letters could never match.
+		g, err := glob.Compile(strings.ToLower(pattern))
 		if err != nil {
 			return nil, fmt.Errorf("malformed origin pattern: %w", err)
 		}
@@ -27,35 +29,18 @@ func NewPatternChecker(allowedOrigins []string) (*PatternChecker, error) {
 	}, nil
 }
 
-func (a *PatternChecker) Check(r *http.Request) error {
+func (a *PatternChecker) Check(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
-		return nil
+		return true
 	}
 
+	origin = strings.ToLower(origin)
 	for _, pattern := range a.allowedOrigins {
-		if pattern.Match(strings.ToLower(origin)) {
-			return nil
+		if pattern.Match(origin) {
+			return true
 		}
 	}
 
-	return fmt.Errorf("request Origin %q is not authorized for Host %q", origin, r.Host)
-}
-
-func CheckSameHost(r *http.Request) error {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		return nil
-	}
-
-	u, err := url.Parse(origin)
-	if err != nil {
-		return fmt.Errorf("failed to parse Origin header %q: %w", origin, err)
-	}
-
-	if strings.EqualFold(r.Host, u.Host) {
-		return nil
-	}
-
-	return fmt.Errorf("request Origin %q is not authorized for Host %q", origin, r.Host)
+	return false
 }

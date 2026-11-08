@@ -21,6 +21,7 @@ fi
 
 VERSION=$1
 ITERATION=$2
+UNIX_NOW=${UNIX_NOW:-$( date +%s )}
 
 INSTALL_DIR=/usr/bin
 LOG_DIR=/var/log/centrifugo
@@ -49,7 +50,7 @@ MAINTAINER="frvzmb@gmail.com"
 VENDOR=centrifugo
 DESCRIPTION="Real-time messaging server"
 
-echo "Start packaging, version: $VERSION, iteration: $ITERATION"
+echo "Start packaging, version: $VERSION, iteration: $ITERATION, release time: $UNIX_NOW"
 
 # cleanup_exit removes all resources created during the process and exits with
 # the supplied returned code.
@@ -88,15 +89,33 @@ make_dir_tree() {
 # do_build builds the code. The version and commit must be passed in.
 do_build() {
     echo "Start building binary"
-    gox -os="linux" -ldflags="-X main.VERSION=$VERSION" -arch="amd64" -output="$TMP_BINARIES_DIR/{{.OS}}-{{.Arch}}/{{.Dir}}"
+
+    if [ -z "$STATS_ENDPOINT" ]
+    then
+        echo "STATS_ENDPOINT not defined"
+        cleanup_exit 1
+    else
+        echo "STATS_ENDPOINT found"
+    fi
+
+    if [ -z "$STATS_TOKEN" ]
+    then
+        echo "STATS_TOKEN not defined"
+        cleanup_exit 1
+    else
+        echo "STATS_TOKEN found"
+    fi
+
+    CGO_ENABLED=0 GOOS="linux" GOARCH="amd64" go build -trimpath -ldflags="-X github.com/centrifugal/centrifugo/v6/internal/build.Version=$VERSION -X github.com/centrifugal/centrifugo/v6/internal/build.UsageStatsEndpoint=$STATS_ENDPOINT -X github.com/centrifugal/centrifugo/v6/internal/build.UsageStatsToken=$STATS_TOKEN -X github.com/centrifugal/centrifugo/v6/internal/build.ReleaseTime=$UNIX_NOW" -o "$TMP_BINARIES_DIR/centrifugo"
     echo "Binary build completed successfully"
+    "$TMP_BINARIES_DIR"/centrifugo version
 }
 
 do_build $VERSION
 
 make_dir_tree $TMP_WORK_DIR
 
-cp $TMP_BINARIES_DIR/linux-amd64/centrifugo $TMP_WORK_DIR/$INSTALL_DIR/
+cp $TMP_BINARIES_DIR/centrifugo $TMP_WORK_DIR/$INSTALL_DIR/
 if [ $? -ne 0 ]; then
     echo "Failed to copy binaries to packaging directory ($TMP_WORK_DIR/$INSTALL_DIR/) -- aborting."
     cleanup_exit 1
@@ -177,6 +196,11 @@ echo "Start building deb package"
 fpm -s dir -t deb $COMMON_FPM_ARGS --description "$DESCRIPTION" \
     -p PACKAGES/ \
     -a amd64 .
+
+cd PACKAGES
+for f in *.deb; do sha256sum $f >> ${f}_checksum.txt; done
+for f in *.rpm; do sha256sum $f >> ${f}_checksum.txt; done
+cd ..
 
 echo "Packaging complete!"
 

@@ -1,7 +1,7 @@
 package health
 
 import (
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -20,18 +20,17 @@ func TestHealthHandler(t *testing.T) {
 	res, err := http.Get(ts.URL)
 	require.NoError(t, err)
 	require.Equal(t, res.StatusCode, http.StatusOK)
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	require.Equal(t, "application/json", res.Header.Get("Content-Type"))
 
-	data, err := ioutil.ReadAll(res.Body)
+	data, err := io.ReadAll(res.Body)
 	require.NoError(t, err)
 	require.Equal(t, []byte(`{}`), data)
 }
 
 func nodeWithMemoryEngine() *centrifuge.Node {
-	c := centrifuge.DefaultConfig
-	n, err := centrifuge.New(c)
+	n, err := centrifuge.New(centrifuge.Config{})
 	if err != nil {
 		panic(err)
 	}

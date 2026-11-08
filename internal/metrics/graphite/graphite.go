@@ -1,6 +1,7 @@
 package graphite
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -18,7 +19,7 @@ var re = regexp.MustCompile("[[:^ascii:]]")
 // PreparePathComponent cleans string to be used as Graphite metric path.
 func PreparePathComponent(s string) string {
 	s = re.ReplaceAllLiteralString(s, "_")
-	return strings.Replace(s, ".", "_", -1)
+	return strings.ReplaceAll(s, ".", "_")
 }
 
 // Exporter to Graphite.
@@ -57,22 +58,24 @@ func New(c Config) *Exporter {
 		Interval: c.Interval,
 		Sink:     exporter.sink,
 	})
-	go exporter.run()
 	return exporter
 }
 
-func (e *Exporter) run() {
+// Run exports metrics until ctx is cancelled, then closes the exporter.
+func (e *Exporter) Run(ctx context.Context) error {
+	defer func() { _ = e.Close() }()
 	for {
 		select {
-		case <-e.closeCh:
-			return
+		case <-ctx.Done():
+			return ctx.Err()
 		case metrics := <-e.sink:
 			_ = e.exportOnce(metrics)
 		}
 	}
 }
 
-// Close stops exporter.
+// Close stops the exporter, also one which never ran. It may be called more
+// than once.
 func (e *Exporter) Close() error {
 	e.closeOnce.Do(func() {
 		close(e.closeCh)
@@ -86,7 +89,7 @@ func (e *Exporter) exportOnce(metrics eagle.Metrics) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = e.write(conn, metrics)
 	return nil
 }

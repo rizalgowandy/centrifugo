@@ -2,18 +2,19 @@ package tools
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
-	"io/ioutil"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"text/template"
-
-	"github.com/google/uuid"
 )
 
-// pathExists returns whether the given file or directory exists or not
-func pathExists(path string) (bool, error) {
+// PathExists returns whether the given file or directory exists or not
+func PathExists(path string) (bool, error) {
 	_, err := os.Stat(path)
 	if err == nil {
 		return true, nil
@@ -24,44 +25,56 @@ func pathExists(path string) (bool, error) {
 	return false, err
 }
 
-func stringInSlice(a string, list []string) bool {
-	for _, b := range list {
-		if b == a {
-			return true
-		}
-	}
-	return false
-}
-
 var jsonConfigTemplate = `{
-  "v3_use_offset": true,
-  "token_hmac_secret_key": "{{.TokenSecret}}",
-  "admin_password": "{{.AdminPassword}}",
-  "admin_secret": "{{.AdminSecret}}",
-  "api_key": "{{.APIKey}}",
-  "allowed_origins": []
+  "client": {
+    "token": {
+      "hmac_secret_key": "{{.TokenSecret}}"
+    },
+    "allowed_origins": []
+  },
+  "admin": {
+    "enabled": false,
+    "password": "{{.AdminPassword}}",
+    "secret": "{{.AdminSecret}}"
+  },
+  "http_api": {
+    "key": "{{.APIKey}}"
+  }
 }
 `
 
-var tomlConfigTemplate = `v3_use_offset = true
-token_hmac_secret_key = "{{.TokenSecret}}"
-admin_password = "{{.AdminPassword}}"
-admin_secret = "{{.AdminSecret}}"
-api_key = "{{.APIKey}}"
-allowed_origins = []
+var tomlConfigTemplate = `[client]
+  allowed_origins = []
+
+  [client.token]
+    hmac_secret_key = "{{.TokenSecret}}"
+
+[admin]
+  enabled = false
+  password = "{{.AdminPassword}}"
+  secret = "{{.AdminSecret}}"
+
+[http_api]
+  key = "{{.APIKey}}"
 `
 
-var yamlConfigTemplate = `v3_use_offset: true
-token_hmac_secret_key: {{.TokenSecret}}
-admin_password: {{.AdminPassword}}
-admin_secret: {{.AdminSecret}}
-api_key: {{.APIKey}}
-allowed_origins: []
+var yamlConfigTemplate = `client:
+  token:
+    hmac_secret_key: "{{.TokenSecret}}"
+  allowed_origins: []
+
+admin:
+  enabled: false
+  password: "{{.AdminPassword}}"
+  secret: "{{.AdminSecret}}"
+
+http_api:
+  key: "{{.APIKey}}"
 `
 
 // GenerateConfig generates configuration file at provided path.
 func GenerateConfig(f string) error {
-	exists, err := pathExists(f)
+	exists, err := PathExists(f)
 	if err != nil {
 		return err
 	}
@@ -74,11 +87,7 @@ func GenerateConfig(f string) error {
 		ext = ext[1:]
 	}
 
-	supportedExts := []string{"json", "toml", "yaml", "yml"}
-
-	if !stringInSlice(ext, supportedExts) {
-		return errors.New("output config file must have one of supported extensions: " + strings.Join(supportedExts, ", "))
-	}
+	supportedExtensions := []string{"json", "toml", "yaml", "yml"}
 
 	var t *template.Template
 
@@ -89,6 +98,8 @@ func GenerateConfig(f string) error {
 		t, err = template.New("config").Parse(tomlConfigTemplate)
 	case "yaml", "yml":
 		t, err = template.New("config").Parse(yamlConfigTemplate)
+	default:
+		return errors.New("output config file must have one of supported extensions: " + strings.Join(supportedExtensions, ", "))
 	}
 	if err != nil {
 		return err
@@ -101,11 +112,30 @@ func GenerateConfig(f string) error {
 		AdminSecret   string
 		APIKey        string
 	}{
-		uuid.New().String(),
-		uuid.New().String(),
-		uuid.New().String(),
-		uuid.New().String(),
+		mustGenerateSecretKey(64),
+		mustGenerateSecretKey(16),
+		mustGenerateSecretKey(64),
+		mustGenerateSecretKey(64),
 	})
 
-	return ioutil.WriteFile(f, output.Bytes(), 0644)
+	return os.WriteFile(f, output.Bytes(), 0600)
+}
+
+func OptionalStringChoice(value string, choices []string) (string, error) {
+	if value == "" {
+		// Empty value is valid for optional configuration key.
+		return value, nil
+	}
+	if !slices.Contains(choices, value) {
+		return "", fmt.Errorf("invalid value: %s, possible choices are: %s", value, strings.Join(choices, ", "))
+	}
+	return value, nil
+}
+
+func mustGenerateSecretKey(byteLen int) string {
+	key := make([]byte, byteLen)
+	if _, err := rand.Read(key); err != nil {
+		panic(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(key)
 }

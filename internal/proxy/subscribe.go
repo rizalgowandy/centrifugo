@@ -2,36 +2,17 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 
-	"github.com/centrifugal/centrifuge"
+	"github.com/centrifugal/centrifugo/v6/internal/proxyproto"
 )
-
-// SubscribeRequest ...
-type SubscribeRequest struct {
-	ClientID  string
-	UserID    string
-	Channel   string
-	Transport centrifuge.TransportInfo
-	Token     string
-}
-
-// SubscribeResult ...
-type SubscribeResult struct {
-	Info       json.RawMessage `json:"info"`
-	Base64Info string          `json:"b64info"`
-}
-
-// SubscribeReply ...
-type SubscribeReply struct {
-	Result     *SubscribeResult       `json:"result"`
-	Error      *centrifuge.Error      `json:"error"`
-	Disconnect *centrifuge.Disconnect `json:"disconnect"`
-}
 
 // SubscribeProxy allows to send Subscribe requests.
 type SubscribeProxy interface {
-	ProxySubscribe(context.Context, SubscribeRequest) (*SubscribeReply, error)
+	ProxySubscribe(context.Context, *proxyproto.SubscribeRequest) (*proxyproto.SubscribeResponse, error)
 	// Protocol for metrics and logging.
 	Protocol() string
+	// UseBase64 for bytes in requests from Centrifugo to application backend.
+	UseBase64() bool
+	// IncludeMeta ...
+	IncludeMeta() bool
 }

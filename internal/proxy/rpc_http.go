@@ -2,83 +2,60 @@ package proxy
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
-	"net/http"
+	"fmt"
 
-	"github.com/centrifugal/centrifuge"
-	"github.com/centrifugal/centrifugo/internal/middleware"
+	"github.com/centrifugal/centrifugo/v6/internal/proxyproto"
 )
 
 // HTTPRPCProxy ...
 type HTTPRPCProxy struct {
+	config     Config
 	httpCaller HTTPCaller
-	options    Options
 }
 
-// RPCRequestHTTP ...
-type RPCRequestHTTP struct {
-	baseRequestHTTP
-
-	UserID string          `json:"user"`
-	Method string          `json:"method,omitempty"`
-	Data   json.RawMessage `json:"data,omitempty"`
-	// Base64Data to proxy binary data.
-	Base64Data string `json:"b64data,omitempty"`
-}
+var _ RPCProxy = (*HTTPRPCProxy)(nil)
 
 // NewHTTPRPCProxy ...
-func NewHTTPRPCProxy(endpoint string, httpClient *http.Client, opts ...Option) *HTTPRPCProxy {
-	options := &Options{}
-	for _, opt := range opts {
-		opt(options)
+func NewHTTPRPCProxy(p Config) (*HTTPRPCProxy, error) {
+	httpClient, err := proxyHTTPClient(p, "rpc_proxy")
+	if err != nil {
+		return nil, fmt.Errorf("error creating HTTP client: %w", err)
 	}
 	return &HTTPRPCProxy{
-		httpCaller: NewHTTPCaller(endpoint, httpClient),
-		options:    *options,
-	}
+		config:     p,
+		httpCaller: NewHTTPCaller(httpClient),
+	}, nil
 }
 
 // ProxyRPC ...
-func (p *HTTPRPCProxy) ProxyRPC(ctx context.Context, req RPCRequest) (*RPCReply, error) {
-	httpRequest := middleware.HeadersFromContext(ctx)
-
-	rpcHTTPReq := RPCRequestHTTP{
-		baseRequestHTTP: baseRequestHTTP{
-			Protocol:  string(req.Transport.Protocol()),
-			Encoding:  string(req.Transport.Encoding()),
-			Transport: req.Transport.Name(),
-			ClientID:  req.ClientID,
-		},
-		UserID: req.UserID,
-		Method: req.Method,
-	}
-
-	if req.Transport.Encoding() == centrifuge.EncodingTypeJSON {
-		rpcHTTPReq.Data = req.Data
-	} else {
-		rpcHTTPReq.Base64Data = base64.StdEncoding.EncodeToString(req.Data)
-	}
-
-	data, err := json.Marshal(rpcHTTPReq)
+func (p *HTTPRPCProxy) ProxyRPC(ctx context.Context, req *proxyproto.RPCRequest) (*proxyproto.RPCResponse, error) {
+	data, err := httpEncoder.EncodeRPCRequest(req)
 	if err != nil {
 		return nil, err
 	}
-
-	respData, err := p.httpCaller.CallHTTP(ctx, getProxyHeader(httpRequest, p.options.ExtraHeaders), data)
+	respData, err := p.httpCaller.CallHTTP(ctx, p.config.Endpoint, httpRequestHeaders(ctx, p.config), data)
 	if err != nil {
-		return nil, err
+		return transformRPCResponse(err, p.config.HTTP.StatusToCodeTransforms)
 	}
-
-	var res RPCReply
-	err = json.Unmarshal(respData, &res)
-	if err != nil {
-		return nil, err
-	}
-	return &res, nil
+	return httpDecoder.DecodeRPCResponse(respData)
 }
 
 // Protocol ...
 func (p *HTTPRPCProxy) Protocol() string {
 	return "http"
+}
+
+// UseBase64 ...
+func (p *HTTPRPCProxy) UseBase64() bool {
+	return p.config.BinaryEncoding
+}
+
+// IncludeMeta ...
+func (p *HTTPRPCProxy) IncludeMeta() bool {
+	return p.config.IncludeConnectionMeta
+}
+
+// Close closes idle connections to the proxy endpoint.
+func (p *HTTPRPCProxy) Close() error {
+	return closeHTTPCaller(p.httpCaller)
 }

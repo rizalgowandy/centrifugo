@@ -4,76 +4,75 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
-	"github.com/centrifugal/centrifugo/internal/api"
-	"github.com/centrifugal/centrifugo/internal/middleware"
+	"github.com/centrifugal/centrifugo/v6/internal/api"
+	"github.com/centrifugal/centrifugo/v6/internal/configtypes"
+	"github.com/centrifugal/centrifugo/v6/internal/middleware"
+	"github.com/centrifugal/centrifugo/v6/internal/reverseproxy"
+	"github.com/centrifugal/centrifugo/v6/internal/tools"
+	"github.com/centrifugal/centrifugo/v6/internal/webui"
 
 	"github.com/centrifugal/centrifuge"
 	"github.com/gorilla/securecookie"
 	"github.com/rs/zerolog/log"
 )
 
-// Config ...
-type Config struct {
-	// Prefix is a custom prefix to handle admin endpoints on.
-	Prefix string
+type Config = configtypes.Admin
 
-	// WebPath is path to admin web application to serve.
-	WebPath string
-
-	// WebFS is custom filesystem to serve as admin web application.
-	// In our case we pass embedded web interface which implements
-	// FileSystem interface.
-	WebFS http.FileSystem
-
-	// Password is an admin password.
-	Password string
-
-	// Secret is a secret to generate auth token for admin requests.
-	Secret string
-
-	// Insecure turns on insecure mode for admin endpoints - no auth
-	// required to connect to web interface and for requests to admin API.
-	// Admin resources must be protected by firewall rules in production when
-	// this option enabled otherwise everyone from internet can make admin
-	// actions.
-	Insecure bool
-}
-
-// Handler handles admin web interface endpoints.
+// Handler handles admin web UI endpoints.
 type Handler struct {
 	mux    *http.ServeMux
 	node   *centrifuge.Node
-	config Config
+	config configtypes.Admin
 }
 
-// NewHandler creates new Handler.
-func NewHandler(n *centrifuge.Node, apiExecutor *api.Executor, c Config) *Handler {
+// NewHandler creates new Handler. It returns an error when the admin web reverse
+// proxy can not be created.
+func NewHandler(n *centrifuge.Node, apiExecutor *api.Executor, c Config) (*Handler, error) {
 	h := &Handler{
 		node:   n,
 		config: c,
 	}
 	mux := http.NewServeMux()
-	prefix := strings.TrimRight(h.config.Prefix, "/")
-	mux.Handle(prefix+"/admin/auth", middleware.Post(http.HandlerFunc(h.authHandler)))
-	mux.Handle(prefix+"/admin/api", middleware.Post(h.adminSecureTokenAuth(api.NewHandler(n, apiExecutor, api.Config{}))))
+	prefix := strings.TrimRight(h.config.HandlerPrefix, "/")
+	mux.Handle(prefix+"/admin/init", http.HandlerFunc(h.initHandler))
+	// Throttle repeated failed password attempts per client IP to slow brute-force
+	// of admin.password. Only failures count and each IP is tracked independently,
+	// so a valid login is never throttled - including while another source attacks.
+	//
+	// This is best-effort, in-process protection only. The admin auth endpoint is
+	// intended to be reachable by trusted operators, and Centrifugo recommends
+	// restricting access to it at the infrastructure level (firewall rules, a
+	// private network, an authenticating reverse proxy, etc.). The throttle here
+	// raises the bar for brute-force but is not a substitute for that: the primary
+	// protection of the admin endpoint must be done at the infrastructure level.
+	authThrottle := middleware.NewAuthThrottle(10, time.Minute, nil)
+	mux.Handle(prefix+"/admin/auth", middleware.Post(authThrottle.Middleware(http.HandlerFunc(h.authHandler))))
+	mux.Handle(prefix+"/admin/api", middleware.Post(h.adminSecureTokenAuth(api.NewHandler(n, apiExecutor, api.Config{}).OldRoute())))
+
 	webPrefix := prefix + "/"
-	if c.WebPath != "" {
+	if c.WebProxyAddress != "" {
+		log.Info().Str("address", c.WebProxyAddress).Msg("using admin web reverse proxy")
+		proxy, err := reverseproxy.New(c.WebProxyAddress)
+		if err != nil {
+			return nil, err
+		}
+		mux.HandleFunc(webPrefix, reverseproxy.ProxyRequestHandler(proxy))
+	} else if c.WebPath != "" {
 		mux.Handle(webPrefix, http.StripPrefix(webPrefix, http.FileServer(http.Dir(c.WebPath))))
-	} else if c.WebFS != nil {
-		mux.Handle(webPrefix, http.StripPrefix(webPrefix, http.FileServer(c.WebFS)))
+	} else {
+		mux.Handle(webPrefix, http.StripPrefix(webPrefix, http.FileServer(webui.FS)))
 	}
 	h.mux = mux
-	return h
+	return h, nil
 }
 
 func (s *Handler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(rw, r)
 }
 
-// adminSecureTokenAuth ...
 func (s *Handler) adminSecureTokenAuth(h http.Handler) http.Handler {
-
 	secret := s.config.Secret
 	insecure := s.config.Insecure
 
@@ -89,42 +88,68 @@ func (s *Handler) adminSecureTokenAuth(h http.Handler) http.Handler {
 			return
 		}
 
+		var token string
+
 		authorization := r.Header.Get("Authorization")
+		if authorization != "" {
+			parts := strings.Fields(authorization)
+			if len(parts) != 2 {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			authMethod := strings.ToLower(parts[0])
+			if authMethod != "token" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			token = parts[1]
+		}
 
-		parts := strings.Fields(authorization)
-		if len(parts) != 2 {
+		if token == "" || !checkSecureAdminToken(secret, token) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		authMethod := strings.ToLower(parts[0])
-
-		if authMethod != "token" || !checkSecureAdminToken(secret, parts[1]) {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-
 		h.ServeHTTP(w, r)
 	})
 }
 
+// initHandler allows to get admin web interface settings.
+func (s *Handler) initHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	resp := map[string]any{
+		"insecure": s.config.Insecure,
+		"edition":  "oss",
+	}
+
+	secret := s.config.Secret
+	authenticated := false
+
+	if s.config.Insecure {
+		authenticated = true
+	} else if secret != "" {
+		var token string
+		authorization := r.Header.Get("Authorization")
+		if authorization != "" {
+			parts := strings.Fields(authorization)
+			if len(parts) == 2 && strings.ToLower(parts[0]) == "token" {
+				token = parts[1]
+			}
+		}
+		if token != "" && checkSecureAdminToken(secret, token) {
+			authenticated = true
+		}
+	}
+	resp["authenticated"] = authenticated
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
 // authHandler allows to get admin web interface token.
 func (s *Handler) authHandler(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024) // 1MB limit.
 	formPassword := r.FormValue("password")
 
-	insecure := s.config.Insecure
 	password := s.config.Password
 	secret := s.config.Secret
-
-	if insecure {
-		w.Header().Set("Content-Type", "application/json")
-		resp := struct {
-			Token string `json:"token"`
-		}{
-			Token: "insecure",
-		}
-		_ = json.NewEncoder(w).Encode(resp)
-		return
-	}
 
 	if password == "" || secret == "" {
 		log.Error().Msg("admin_password and admin_secret must be set in configuration")
@@ -132,7 +157,7 @@ func (s *Handler) authHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if formPassword == password {
+	if tools.SecureCompareString(formPassword, password) {
 		w.Header().Set("Content-Type", "application/json")
 		token, err := generateSecureAdminToken(secret)
 		if err != nil {
